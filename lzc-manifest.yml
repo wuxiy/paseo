@@ -79,6 +79,12 @@ services:
       - /lzcapp/var/paseo:/home/paseo
       # code visible to Paseo and the agents it launches
       - /lzcapp/var/workspace:/workspace
+    # The workspace bind mount arrives root-owned, while the image's entrypoint
+    # drops the daemon (and every agent it spawns) to the non-root `paseo`
+    # user: without this, checkouts and edits fail with EACCES. Idempotent;
+    # runs as root on every start, before the entrypoint.
+    setup_script: |
+      chown paseo:paseo /workspace
     healthcheck:
       test:
         - CMD-SHELL
