@@ -33,13 +33,20 @@ usage: |
 
   数据都在 /lzcapp/var/paseo（登录凭据、会话、项目、worktree），升级应用不会丢。
 
-  手机/桌面客户端：可以走应用域名 + Paseo 自己的配对（配对链接会指向本应用域名）。
-  若要用第三方客户端直连且不走懒猫登录，在应用安装/设置里填一个 PASEO_PASSWORD。
+  客户端接入：
+  - 浏览器：就用本页，登录懒猫微服账号即可。
+  - 手机/桌面 App：在本页 Settings → Pair Device → Enable relay，然后手机 App
+    扫配对二维码（relay 是盒子出站连接，端到端加密，不用暴露端口）。
+  - 想让 App/CLI 直接用域名连：需要给 /api、/ws 开 public_path 并设置 daemon
+    密码，当前打包默认没开（打开后浏览器也要输一次这个密码）。
 
   English: Open this page and use it - Lazycat account login is the only auth.
   Preinstalled agents: claude, codex, opencode, copilot (log in once in a Paseo
   terminal). Workspace: /workspace on the box is
   /lzcapp/var/workspace. State lives in /lzcapp/var/paseo and survives upgrades.
+  Native apps: enable the relay under Settings -> Pair Device, then scan the
+  pairing code. Direct domain connections need public_path + a daemon password,
+  which this package leaves off by default.
 application:
   subdomain: paseo
   routes:

@@ -58,8 +58,26 @@
   parakeet/kokoro，来自 GitHub releases），用于语音输入与朗读，落在
   `/lzcapp/var/paseo/.paseo/models`。不想要这些功能/流量时，在应用环境变量里加
   `PASEO_VOICE_MODE_ENABLED=false`、`PASEO_DICTATION_ENABLED=false` 重启即可。
-- **Relay**：上游新 home 默认 `relay.enabled=true`（连接 `relay.paseo.sh` 用于
-  设备配对）。不需要可以设 `PASEO_RELAY_ENABLED=false`。
+- **Relay**：新 home 默认 `daemon.relay.enabled=false`（上游
+  `persisted-config.ts` 的 `DEFAULT_PERSISTED_CONFIG` 就是这么写的），所以
+  `paseo daemon status` 里 `relay.enabled` 是 false。手机 App 想走 relay 配对，
+  在界面 Settings → Pair Device → Enable relay，或容器里
+  `paseo daemon config set daemon.relay.enabled true && paseo daemon restart`。
+  relay 连接是盒子出站到 `relay.paseo.sh:443`（已确认可达），端到端加密，
+  不需要对外暴露任何端口。
+
+## 客户端怎么接
+
+`application.routes` 只暴露在懒猫账号登录之后，所以现在能直接用的是**浏览器**；
+原生 App / CLI 要另开一条通路，三选一：
+
+| 方式 | 改动 | 客户端填什么 | 代价 |
+| ---- | ---- | ------------ | ---- |
+| 浏览器（现在就能用） | 无 | `https://paseo.<域名>` | 只能浏览器；懒猫登录 |
+| Relay 配对（推荐给手机） | 界面里 Enable relay | 手机 App 扫码 | 盒子能出网到 relay.paseo.sh |
+| 域名直连 | manifest 加 `public_path: [/api, /ws]`，安装时填 `paseo_password` | `https://paseo.<域名>` + 密码 | `/api`、`/ws` 不再要懒猫登录，改由 daemon 密码保护；浏览器也要输一次密码 |
+| 局域网直连 | manifest 加 TCP `ingress` 发布 6767，并设 `paseo_password` | `http://<盒子IP>:6767` + 密码 | 只在局域网；端口暴露 |
+| CLI over SSH | 无（盒子 SSH 22222 + 公钥） | `paseo --host ssh://box@<盒子> ls` | 需要配盒子 SSH |
 
 ## 镜像
 
