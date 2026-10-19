@@ -12,12 +12,14 @@
 | ---- | ---- |
 | `package.yml` | lpk 元数据：包名 `cloud.lazycat.app.paseo`、版本（跟随上游 release）、多语言描述、权限 |
 | `lzc-manifest.yml` | 运行结构：一个 `paseo` 服务 + 路由 / 环境变量 / 持久化 / 健康检查 |
-| `lzc-build.yml` | 构建配置：由 `lzc/build.sh` 生成镜像定义并 `embed:paseo` 打进 lpk |
+| `lzc-build.yml` | 构建配置（默认 `builder: remote`，在盒子的开发者工具里按盒子架构构建）：由 `lzc/build.sh` 生成镜像定义并 `embed:paseo` 打进 lpk |
+| `lzc-build.local.yml` | 本地构建变体（`builder: local`，本机 Docker buildx 按 `linux/amd64` 构建后内嵌） |
 | `lzc-deploy-params.yml` | 可选安装参数：`paseo_password`（默认留空） |
 | `lzc/build.sh` | buildscript：按 `package.yml` 的版本生成 `lzc/gen/Dockerfile` |
 | `lzc/agents.env` | 烧进镜像的 agent CLI 版本（唯一的版本来源） |
 | `lzc/icon.png` | 应用图标（取自上游 `packages/app/assets/images/icon.png`，1024×1024） |
 | `lzc/sync-upstream.sh` | 一键 fetch + merge 上游，并检查 `package.yml` 是否落后 |
+| `lzc/verify-lpk.py` | 安装前校验 lpk 内嵌镜像是否完整（见「构建与安装」） |
 | `README-lzc.md` | 本文档 |
 
 ## 运行模型
@@ -48,6 +50,9 @@
   - `/lzcapp/var/paseo` → 容器 `/home/paseo`：daemon 状态、会话、worktree，
     以及 agent 的登录凭据（`.claude`、`.codex`、`.config`、`.local` 等）。
   - `/lzcapp/var/workspace` → 容器 `/workspace`：Paseo 与 agent 共享的代码目录。
+    bind 挂载进来时属主是 root，而入口脚本会把 daemon 和它启动的 agent 降到
+    非 root 的 `paseo` 用户，所以 manifest 里有一段 `setup_script: chown paseo:paseo
+    /workspace`（每次启动幂等执行），否则在 /workspace 里 clone / 改文件会 EACCES。
   - 升级应用不会丢数据；卸载应用是否保留由盒子侧策略决定。
 - **首次启动**：daemon 会后台下载本地语音模型（sherpa-onnx 的
   parakeet/kokoro，来自 GitHub releases），用于语音输入与朗读，落在
@@ -117,7 +122,24 @@ env -u ALL_PROXY -u http_proxy -u https_proxy \
 
 # 粗略看包内容
 lzc-cli lpk info release/cloud.lazycat.app.paseo.lpk
+
+# 安装前校验内嵌镜像完整（lpk info 只看元数据，不校验 blob）
+python3 lzc/verify-lpk.py release/cloud.lazycat.app.paseo.lpk
 ```
+
+- **装之前一定跑一次 `lzc/verify-lpk.py`**。`lzc-cli` 的 `.lzc-cli-cache/`
+  会按镜像 ID 复用打好的 OCI 包，混用 remote/local 构建时缓存里的 blob 可能不全，
+  打出来的 lpk 表面正常（`lpk info` 不报错），装到盒子才失败：
+  `pull image failed: ... archive/tar: invalid tar header`。遇到这种情况：
+
+  ```sh
+  rm -rf .lzc-cli-cache            # 清掉按镜像 ID 复用的包缓存
+  rm -f release/*.lpk
+  # 重新 build，再 verify 一次
+  ```
+
+  校验器直接读 tar，把 `images/index.json` → manifest → config/layer 全链路
+  的 digest 都重算一遍，缺 blob 或哈希不符都会报出来。
 
 - 默认 `builder: remote`：镜像在盒子的「懒猫开发者工具」里按盒子架构构建，
   构建上下文只有 `lzc/gen/Dockerfile`（几 KB）。盒子没装开发者工具时改成
@@ -143,6 +165,22 @@ lzc-cli lpk info release/cloud.lazycat.app.paseo.lpk
 3. 把 `lzc-manifest.yml` 的 `services.paseo.image` 换成返回的
    `registry.lazycat.cloud/...` 地址，并从 `lzc-build.yml` 删掉 `images.paseo`；
 4. 准备截图/介绍，`lzc-cli appstore publish <lpk>` 提交审核。
+
+## 已验证
+
+2026-10-19 在 cywu 盒子（x86_64，`lzc-build.yml` 的 remote 构建）上装过一轮：
+
+- `lzc-cli project info`：`Installed` / `Status_Running`，`app` 与 `paseo` 两个容器 `healthy`。
+- `https://paseo.<域名>/` 未登录时 307 跳转懒猫登录页（预期，没有 `public_path`）。
+- 容器内 Host 校验：`/api/health` 直连 200、`Host: <AppDomain>` 200、`Host: paseo` 200、
+  `Host: evil.example.com` 403。
+- `/ws` WebSocket 握手 101（`curl` 带 Upgrade 头；15s 内不发 hello 会被 daemon 主动断开，正常）。
+- 渲染后的环境变量正确：`PASEO_HOSTNAMES=paseo.cywu.heiyu.space,.lzcapp,paseo,localhost`，
+  `PASEO_APP_BASE_URL` 指向应用域名，`PASEO_PASSWORD` 为空。
+- 四个 agent CLI 在 paseo 容器里都能执行（构建时的 `--version` 冒烟 + 安装后 `which`）。
+- 装完后发现 `/workspace` bind 挂载属主是 root，非 root 的 `paseo` 用户写不进去，
+  已在 manifest 加 `setup_script: chown paseo:paseo /workspace`，重装后 `touch /workspace/.probe`
+  以 `paseo` 身份成功。
 
 ## 安全清单
 
