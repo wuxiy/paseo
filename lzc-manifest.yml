@@ -1,0 +1,91 @@
+# Paseo on Lazycat (LPK V2).
+#
+# One service, one port: the upstream image runs the daemon and serves the
+# bundled web UI from the same origin on 6767 (docs/docker.md). lzc/build.sh
+# derives the packaged image from ghcr.io/getpaseo/paseo by adding the agent
+# CLIs the base image leaves out.
+#
+# Routing: everything goes to the one origin; /ws is listed as an upstream so
+# the WebSocket upgrade path is explicit (the daemon's socket is ws://…/ws).
+#
+# Auth: Lazycat's forced account login is the only door. PASEO_PASSWORD stays
+# unset so the bundled web UI connects without a second login; the app is
+# admin_only in package.yml because the daemon runs agents that can execute
+# anything in the mounted workspace.
+#
+# Persistence: /lzcapp/var/paseo holds the daemon home (daemon state, agent
+# credentials under .claude/.codex/.config, sessions, worktrees), and
+# /lzcapp/var/workspace is the shared code directory agents see at /workspace.
+usage: |
+  Paseo 已经在你盒子上跑起来了：打开本页即用，登录走懒猫微服账号，不需要额外密码。
+
+  预装的 agent CLI（在 Paseo 里开一个终端登录一次即可，凭据保存在盒子上）：
+    claude    Claude Code        claude 后按提示登录（或 claude login）
+    codex     OpenAI Codex       codex 后按提示登录
+    opencode  OpenCode           opencode
+    copilot   GitHub Copilot     copilot 后按提示登录
+  其他 agent（Gemini CLI、Cline、Amp 等）在 Providers 里从目录添加，Paseo 会用
+  npx 自动装好，无需手写 Dockerfile。
+
+  代码放哪：容器里的 /workspace 对应盒子的 /lzcapp/var/workspace，Paseo 和它启动
+  的 agent 都能读写。想跑自己的仓库，在内置终端里：
+    cd /workspace && git clone <你的仓库> && cd <仓库>
+
+  数据都在 /lzcapp/var/paseo（登录凭据、会话、项目、worktree），升级应用不会丢。
+
+  手机/桌面客户端：可以走应用域名 + Paseo 自己的配对（配对链接会指向本应用域名）。
+  若要用第三方客户端直连且不走懒猫登录，在应用安装/设置里填一个 PASEO_PASSWORD。
+
+  English: Open this page and use it - Lazycat account login is the only auth.
+  Preinstalled agents: claude, codex, opencode, copilot (log in once in a Paseo
+  terminal). Workspace: /workspace on the box is
+  /lzcapp/var/workspace. State lives in /lzcapp/var/paseo and survives upgrades.
+application:
+  subdomain: paseo
+  routes:
+    # the web UI, its assets, the REST API and everything else
+    - /=http://paseo:6767
+  upstreams:
+    # daemon WebSocket, exact path, prefix kept
+    - location: /ws
+      backend: http://paseo:6767
+      disable_trim_location: true
+    - location: /ws/
+      backend: http://paseo:6767
+      disable_trim_location: true
+services:
+  paseo:
+    image: embed:paseo
+    environment:
+      - HOME=/home/paseo
+      - PASEO_HOME=/home/paseo/.paseo
+      - PASEO_LISTEN=0.0.0.0:6767
+      - PASEO_WEB_UI_ENABLED=true
+      - PASEO_LOG_LEVEL=info
+      - PASEO_LOG_FORMAT=json
+      # the box gateway forwards the app domain; localhost and IPs are allowed
+      # by the daemon by default, paseo/.lzcapp cover in-cluster callers
+      - "PASEO_HOSTNAMES={{ .S.AppDomain }},.lzcapp,paseo,localhost"
+      # pairing links and the in-app "open in browser" URLs point back here
+      - "PASEO_APP_BASE_URL=https://{{ .S.AppDomain }}"
+      - "PASEO_CORS_ORIGINS=https://{{ .S.AppDomain }}"
+      # the gateway forwards from the box's internal networks; trust them so
+      # X-Forwarded-Proto/-For reach the daemon
+      - PASEO_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,loopback
+      # empty (the default) keeps the web UI password-less behind Lazycat login
+      - PASEO_PASSWORD={{ if .U.paseo_password }}{{ .U.paseo_password }}{{ end }}
+    binds:
+      # daemon home: state, sessions, worktrees and agent credentials
+      - /lzcapp/var/paseo:/home/paseo
+      # code visible to Paseo and the agents it launches
+      - /lzcapp/var/workspace:/workspace
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          node -e "require('http').get({hostname:'127.0.0.1',port:6767,path:'/api/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # first boot of the daemon can take a while on a loaded box
+      start_period: 120s

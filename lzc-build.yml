@@ -1,0 +1,18 @@
+# Release build config for the Paseo lpk.
+#
+# lzc/build.sh generates lzc/gen/Dockerfile: the official
+# ghcr.io/getpaseo/paseo image for the version in package.yml, plus the agent
+# CLIs the upstream base image deliberately leaves out (docs/docker.md).
+#
+# builder: remote builds the image in the box's Lazycat Developer Tools at the
+# box's own architecture. Switch to local (see README-lzc.md) when the box has
+# no developer tools; local builds are always linux/amd64.
+buildscript: lzc/build.sh
+manifest: lzc-manifest.yml
+pkgout: release/
+icon: lzc/icon.png
+images:
+  paseo:
+    context: lzc/gen
+    dockerfile: lzc/gen/Dockerfile
+    builder: remote

@@ -1,0 +1,20 @@
+# Local-build variant of lzc-build.yml.
+#
+# Same package, but the image is built with the machine's own Docker (buildx,
+# linux/amd64) and fully embedded, instead of building it on the box's Lazycat
+# Developer Tools. Use it when the box has no developer tools, or to produce
+# one self-contained amd64 lpk from a machine that can already pull
+# ghcr.io/getpaseo/paseo.
+#
+#   BUILDX_CONFIG=$PWD/.buildx \
+#     lzc-cli project build -f lzc-build.local.yml \
+#       -o release/cloud.lazycat.app.paseo.lpk
+buildscript: lzc/build.sh
+manifest: lzc-manifest.yml
+pkgout: release/
+icon: lzc/icon.png
+images:
+  paseo:
+    context: lzc/gen
+    dockerfile: lzc/gen/Dockerfile
+    builder: local
