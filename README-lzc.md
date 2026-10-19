@@ -68,16 +68,53 @@
 
 ## 客户端怎么接
 
-`application.routes` 只暴露在懒猫账号登录之后，所以现在能直接用的是**浏览器**；
-原生 App / CLI 要另开一条通路，三选一：
+这个 lpk 现在同时开了两条路，盒子**不需要**外网访问权限：
 
-| 方式 | 改动 | 客户端填什么 | 代价 |
-| ---- | ---- | ------------ | ---- |
-| 浏览器（现在就能用） | 无 | `https://paseo.<域名>` | 只能浏览器；懒猫登录 |
-| Relay 配对（推荐给手机） | 界面里 Enable relay | 手机 App 扫码 | 盒子能出网到 relay.paseo.sh |
-| 域名直连 | manifest 加 `public_path: [/api, /ws]`，安装时填 `paseo_password` | `https://paseo.<域名>` + 密码 | `/api`、`/ws` 不再要懒猫登录，改由 daemon 密码保护；浏览器也要输一次密码 |
-| 局域网直连 | manifest 加 TCP `ingress` 发布 6767，并设 `paseo_password` | `http://<盒子IP>:6767` + 密码 | 只在局域网；端口暴露 |
-| CLI over SSH | 无（盒子 SSH 22222 + 公钥） | `paseo --host ssh://box@<盒子> ls` | 需要配盒子 SSH |
+| 客户端 | 地址 | 鉴权 |
+| ------ | ---- | ---- |
+| 手机 / 桌面 App（同一局域网） | `http://<盒子局域网IP>:6767` | daemon 密码（12 位，`usage` 里显示，或用 `paseo_password` 参数自定义） |
+| 同一局域网的 CLI / agent | `paseo --host http://<盒子局域网IP>:6767` | 同上（CLI 会提示，或 host 里带） |
+| 浏览器 | `https://paseo.<域名>` | 懒猫账号登录 + daemon 密码 |
+| 外网手机 | relay 配对（Settings → Pair Device → Enable relay，扫码） | 配对链接（端到端加密，盒子只出站） |
+
+实现细节：
+
+- `application.ingress` 用 TCP 把服务的 `6767` 发布到盒子局域网（`publish_port: "6767"`）。
+  这是手机 App 在无外网、无 relay 时唯一能直连的入口。
+- 端口一旦发布，daemon 必须带密码，所以 `PASEO_PASSWORD` 用
+  `{{ printf "%.12s" (stable_secret "paseo_password") }}` 按盒子生成 12 位；
+  `lzc-deploy-params.yml` 里的 `paseo_password` 可以覆盖成好记的值。
+  `/api/health` 是密码唯一豁免的路径，方便探活。
+- 浏览器同样要输这个密码（Paseo 自己的登录，在懒猫账号登录之后）；`usage`
+  文本里直接渲染了密码，首次打开应用页就能看到。
+- 外网访问（懒猫应用的「外网访问」开关）不是必需的：局域网直连只走盒子内网，
+  relay 只走盒子出站。要给第三方客户端走域名直连，才需要 `public_path: [/api, /ws]`
+  （当前没开，避免把 daemon 裸露到域名上）。
+
+## NAS 上的其他 agent
+
+Paseo 只在**自己的容器里**启动 provider 进程；NAS 宿主机上已经装好的 CLI 它看不见。
+两个方向分开看：
+
+1. **让 Paseo 使用这个 agent（作为 provider）**
+   - 最稳：把 CLI 烧进镜像——在 `lzc/agents.env` 加版本、在 `lzc/build.sh` 的
+     `npm install -g` 里加包名，重建 lpk。
+   - ACP agent 不用改镜像：在 Paseo 的 Providers 目录里添加，或写
+     `~/.paseo/config.json`（容器 `/home/paseo/.paseo/config.json`，盒子
+     `/lzcapp/var/paseo/.paseo/config.json`）：
+     ```json
+     {"agents":{"providers":{"my-agent":{"extends":"acp","label":"My Agent","command":["my-agent","--acp"]}}}}
+     ```
+     然后 `paseo reload`。
+   - 宿主机二进制：在 manifest 里 bind 挂载进容器，用 provider 的 `command`
+     指到挂载路径；要求二进制能在 Debian bookworm 里跑，登录凭据目录也要一起挂。
+2. **让 NAS 上的 agent / 脚本调用 Paseo（作为客户端）**
+   - 同一局域网：`npm i -g @getpaseo/cli` 后 `paseo --host http://<盒子IP>:6767`，
+     密码用 `usage` 里那个；SDK 用 `ws://<盒子IP>:6767/ws`。
+   - Paseo 容器内：`127.0.0.1:6767`。
+   - `/mcp/agents` 是注入给 Paseo 自己启动的 agent 的内部端点（每次 daemon 启动
+     随机 token），不是外部 agent 的公共 API；外部集成走 CLI 或
+     `@getpaseo/client`。
 
 ## 镜像
 
@@ -186,23 +223,28 @@ python3 lzc/verify-lpk.py release/cloud.lazycat.app.paseo.lpk
 
 ## 已验证
 
-2026-10-19 在 cywu 盒子（x86_64，`lzc-build.yml` 的 remote 构建）上装过一轮：
+2026-10-19 在 cywu 盒子（x86_64，`lzc-build.yml` 的 remote 构建）上验证：
 
 - `lzc-cli project info`：`Installed` / `Status_Running`，`app` 与 `paseo` 两个容器 `healthy`。
-- `https://paseo.<域名>/` 未登录时 307 跳转懒猫登录页（预期，没有 `public_path`）。
+- 未登录访问 `https://paseo.<域名>/`：307 跳懒猫登录页（没有 `public_path`）。
 - 容器内 Host 校验：`/api/health` 直连 200、`Host: <AppDomain>` 200、`Host: paseo` 200、
   `Host: evil.example.com` 403。
-- `/ws` WebSocket 握手 101（`curl` 带 Upgrade 头；15s 内不发 hello 会被 daemon 主动断开，正常）。
-- 渲染后的环境变量正确：`PASEO_HOSTNAMES=paseo.cywu.heiyu.space,.lzcapp,paseo,localhost`，
-  `PASEO_APP_BASE_URL` 指向应用域名，`PASEO_PASSWORD` 为空。
-- 四个 agent CLI 在 paseo 容器里都能执行（构建时的 `--version` 冒烟 + 安装后 `which`）。
-- 装完后发现 `/workspace` bind 挂载属主是 root，非 root 的 `paseo` 用户写不进去，
-  已在 manifest 加 `setup_script: chown paseo:paseo /workspace`，重装后 `touch /workspace/.probe`
-  以 `paseo` 身份成功。
+- 密码生效：`/api/status` 无 `Authorization` 返回 401、带 `Bearer <密码>` 返回 200；
+  `/api/health` 是唯一豁免。`/ws` 握手 101，鉴权在 `hello` 阶段。
+- 渲染后的环境变量正确：`PASEO_HOSTNAMES=…`、`PASEO_APP_BASE_URL=https://<域名>`、
+  `PASEO_PASSWORD` 为 `usage` 里显示的 12 位密码；`ingress` 发布 `6767`。
+- 四个 agent CLI 在 paseo 容器里都能执行（构建时 `--version` 冒烟 + 安装后 `which`）。
+- `/workspace` bind 挂载属主问题已修：manifest 里 `setup_script: chown paseo:paseo
+  /workspace`，重装后以 `paseo` 身份 `touch /workspace/.probe` 成功。
+- **局域网 6767 的可达性未能在本机验证**：这台开发机是通过懒猫隧道（域名解析到
+  127.0.0.1）访问盒子的，和盒子不在同一网段，扫不到 6767。请用盒子同网段的手机/
+  电脑执行 `curl http://<盒子IP>:6767/api/health`（应 200）确认；如果拒绝连接，
+  把 `ingress` 的 `publish_port` 去掉（端口默认取 `port`）或检查盒子防火墙。
 
 ## 安全清单
 
-- `public_path` 一个都没开：网页界面、REST API、`/ws` 全在懒猫登录之后。
-- 不发布 daemon 端口的 ingress；需要 box 内直连再加 TCP ingress，并设 `paseo_password`。
+- `public_path` 一个都没开：网页界面、REST API、`/ws` 仍然在懒猫登录之后。
+- 局域网 `6767` 是唯一的裸端口暴露，靠 daemon 密码保护；**不要把密码留空**，
+  也不要把 `ingress` 加到公网。密码用 `paseo_password` 参数或 `stable_secret`。
 - `admin_only: true`；`/workspace` 和 `/home/paseo` 都是应用私有数据，别改成全局可写目录。
 - agent 的登录凭据在 `/lzcapp/var/paseo` 里，等于盒子上的敏感文件，按盒子的备份/权限策略对待。

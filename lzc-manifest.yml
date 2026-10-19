@@ -8,16 +8,19 @@
 # Routing: everything goes to the one origin; /ws is listed as an upstream so
 # the WebSocket upgrade path is explicit (the daemon's socket is ws://…/ws).
 #
-# Auth: Lazycat's forced account login is the only door. PASEO_PASSWORD stays
-# unset so the bundled web UI connects without a second login; the app is
-# admin_only in package.yml because the daemon runs agents that can execute
-# anything in the mounted workspace.
+# Auth: two doors, because the box may have no internet-facing access at all.
+# The bundled web UI is behind Lazycat's forced account login; the daemon's own
+# password (per-box stable_secret, overridable by the paseo_password deploy
+# param) protects the LAN-published 6767 port used by the phone/desktop apps and
+# CLI. The app is admin_only in package.yml because the daemon runs agents that
+# can execute anything in the mounted workspace.
 #
 # Persistence: /lzcapp/var/paseo holds the daemon home (daemon state, agent
 # credentials under .claude/.codex/.config, sessions, worktrees), and
 # /lzcapp/var/workspace is the shared code directory agents see at /workspace.
 usage: |
-  Paseo 已经在你盒子上跑起来了：打开本页即用，登录走懒猫微服账号，不需要额外密码。
+  Paseo 已经在你盒子上跑起来了。浏览器打开本页时先登录懒猫微服账号；Paseo 自己
+  还会要一次密码，用下面「客户端接入」里的那个。
 
   预装的 agent CLI（在 Paseo 里开一个终端登录一次即可，凭据保存在盒子上）：
     claude    Claude Code        claude 后按提示登录（或 claude login）
@@ -33,22 +36,33 @@ usage: |
 
   数据都在 /lzcapp/var/paseo（登录凭据、会话、项目、worktree），升级应用不会丢。
 
-  客户端接入：
-  - 浏览器：就用本页，登录懒猫微服账号即可。
-  - 手机/桌面 App：在本页 Settings → Pair Device → Enable relay，然后手机 App
-    扫配对二维码（relay 是盒子出站连接，端到端加密，不用暴露端口）。
-  - 想让 App/CLI 直接用域名连：需要给 /api、/ws 开 public_path 并设置 daemon
-    密码，当前打包默认没开（打开后浏览器也要输一次这个密码）。
+  客户端接入（盒子没开外网访问也能用）：
+  - 手机/桌面 App：手机和盒子在同一局域网时，Add host 填
+      http://<盒子的局域网IP>:6767
+    密码填下面这个（应用设置里也能看到；安装时填了 paseo_password 则是你填的那个）：
+      {{ if .U.paseo_password }}{{ .U.paseo_password }}{{ else }}{{ printf "%.12s" (stable_secret "paseo_password") }}{{ end }}
+  - 浏览器：打开本页，登录懒猫账号；Paseo 再要密码时同样填上面的。
+  - 外网手机：盒子能出站上网时可走 relay（Settings → Pair Device → Enable
+    relay 后扫码），不需要给盒子开外网访问。
+  - 同一局域网里其他机器上的 CLI / agent：
+      paseo --host http://<盒子的局域网IP>:6767
 
-  English: Open this page and use it - Lazycat account login is the only auth.
-  Preinstalled agents: claude, codex, opencode, copilot (log in once in a Paseo
-  terminal). Workspace: /workspace on the box is
-  /lzcapp/var/workspace. State lives in /lzcapp/var/paseo and survives upgrades.
-  Native apps: enable the relay under Settings -> Pair Device, then scan the
-  pairing code. Direct domain connections need public_path + a daemon password,
-  which this package leaves off by default.
+  English: Open this page and use it. LAN clients (Paseo app, CLI) connect to
+  http://<box-LAN-IP>:6767 with the daemon password shown above. Remote phones
+  can use relay pairing, which only needs outbound access. Preinstalled agents:
+  claude, codex, opencode, copilot. Workspace: /workspace on the box is
+  /lzcapp/var/workspace; state lives in /lzcapp/var/paseo and survives upgrades.
 application:
   subdomain: paseo
+  # Publish the daemon on the box's LAN for the phone/desktop apps and CLI.
+  # The daemon password above is what protects it: never publish 6767 without
+  # one, any device that can reach the box could drive agents.
+  ingress:
+    - protocol: tcp
+      service: paseo
+      port: 6767
+      publish_port: "6767"
+      description: Paseo daemon (LAN clients; daemon password required)
   routes:
     # the web UI, its assets, the REST API and everything else
     - /=http://paseo:6767
@@ -79,8 +93,11 @@ services:
       # the gateway forwards from the box's internal networks; trust them so
       # X-Forwarded-Proto/-For reach the daemon
       - PASEO_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,loopback
-      # empty (the default) keeps the web UI password-less behind Lazycat login
-      - PASEO_PASSWORD={{ if .U.paseo_password }}{{ .U.paseo_password }}{{ end }}
+      # LAN clients (phone/desktop app, CLI) authenticate with this. The
+      # deploy param can override it; the fallback is a per-box secret, so the
+      # published 6767 port is never unauthenticated. Shown in `usage` above
+      # and in the app settings.
+      - PASEO_PASSWORD={{ if .U.paseo_password }}{{ .U.paseo_password }}{{ else }}{{ printf "%.12s" (stable_secret "paseo_password") }}{{ end }}
     binds:
       # daemon home: state, sessions, worktrees and agent credentials
       - /lzcapp/var/paseo:/home/paseo
